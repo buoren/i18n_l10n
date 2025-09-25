@@ -1,0 +1,9 @@
+# Requirements for Docker container deployment
+# Generated from pyproject.toml for pip compatibility
+
+nicegui>=1.4.0,<2.0.0
+sqlalchemy>=2.0.0,<3.0.0
+pymysql>=1.1.0,<2.0.0
+cryptography>=41.0.0,<42.0.0
+alembic>=1.12.0,<2.0.0
+google-cloud-translate>=3.11.0,<4.0.0
