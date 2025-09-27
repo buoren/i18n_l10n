@@ -208,7 +208,17 @@ marimo/_lsp/
 __marimo__/
 
 # Terraform
+.terraform/
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+*.tfplan
+*.tfplan.*
 *.tfvars
 !terraform.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
