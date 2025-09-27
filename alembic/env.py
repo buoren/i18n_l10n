@@ -32,21 +32,25 @@ target_metadata = Base.metadata
 
 def get_url():
     """Get database URL from environment variables or config"""
-    # For Cloud SQL, we'll use the connection name
+    # Check if we have direct database connection details (preferred for Cloud Run)
+    db_host = os.getenv('DB_HOST')
+    if db_host:
+        db_port = os.getenv('DB_PORT', '3306')
+        db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
+        db_user = os.getenv('DB_USER', 'appuser')
+        db_password = os.getenv('DB_PASSWORD', 'password')
+        return f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    
+    # Check if we're running in Cloud Run with Cloud SQL Proxy
     if os.getenv('DB_CONNECTION_NAME'):
         connection_name = os.getenv('DB_CONNECTION_NAME')
         db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
         db_user = os.getenv('DB_USER', 'appuser')
         db_password = os.getenv('DB_PASSWORD', '')
         return f"mysql+pymysql://{db_user}:{db_password}@/{db_name}?unix_socket=/cloudsql/{connection_name}"
-    else:
-        # Local development or direct connection
-        db_host = os.getenv('DB_HOST', 'localhost')
-        db_port = os.getenv('DB_PORT', '3306')
-        db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
-        db_user = os.getenv('DB_USER', 'appuser')
-        db_password = os.getenv('DB_PASSWORD', 'password')
-        return f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    
+    # Fallback to local development
+    return "mysql+pymysql://root:password@localhost:3306/i18n_l10n_db"
 
 
 def run_migrations_offline() -> None:

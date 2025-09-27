@@ -127,34 +127,68 @@ class DatabaseManager:
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
-        self._setup_database()
+        # Don't initialize database on startup - wait for first access
+        logger.info("Database manager created - will initialize on first access")
     
     def _get_database_url(self):
         """Get database URL from environment variables"""
+        # Log all relevant environment variables for debugging
+        logger.info(f"Environment variables - DB_HOST: {os.getenv('DB_HOST')}, DB_CONNECTION_NAME: {os.getenv('DB_CONNECTION_NAME')}")
+        logger.info(f"Environment variables - DB_NAME: {os.getenv('DB_NAME')}, DB_USER: {os.getenv('DB_USER')}")
+        
+        # Check if we have direct database connection details (preferred for Cloud Run)
+        db_host = os.getenv('DB_HOST')
+        if db_host:
+            db_port = os.getenv('DB_PORT', '3306')
+            db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
+            db_user = os.getenv('DB_USER', 'appuser')
+            db_password = os.getenv('DB_PASSWORD', 'password')
+            
+            logger.info(f"Using direct database connection to {db_host}:{db_port}")
+            return f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        
         # Check if we're running in Cloud Run with Cloud SQL Proxy
-        if os.getenv('DB_CONNECTION_NAME'):
+        connection_name = os.getenv('DB_CONNECTION_NAME')
+        if connection_name:
             # Use Unix socket for Cloud SQL Proxy
             db_user = os.getenv('DB_USER', 'appuser')
             db_password = os.getenv('DB_PASSWORD', '')
             db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
-            connection_name = os.getenv('DB_CONNECTION_NAME')
             
             # Cloud SQL Proxy creates a Unix socket at /cloudsql/CONNECTION_NAME
             unix_socket_path = f'/cloudsql/{connection_name}'
             
+            logger.info(f"Using Cloud SQL Proxy connection: {unix_socket_path}")
             return f'mysql+pymysql://{db_user}:{db_password}@/{db_name}?unix_socket={unix_socket_path}'
         
-        # Fallback to direct connection for local development
-        db_host = os.getenv('DB_HOST', 'localhost')
-        db_port = os.getenv('DB_PORT', '3306')
-        db_name = os.getenv('DB_NAME', 'i18n_l10n_db')
-        db_user = os.getenv('DB_USER', 'appuser')
-        db_password = os.getenv('DB_PASSWORD', 'password')
-        
-        return f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        # No fallback - raise exception if we can't determine database connection
+        logger.error("Unable to determine database connection - no DB_HOST or DB_CONNECTION_NAME found")
+        raise ValueError("Database connection not configured: missing DB_HOST or DB_CONNECTION_NAME environment variable")
+    
+    def _ensure_database_initialized(self):
+        """Ensure database is initialized, initialize if needed"""
+        if self.engine is None or self.SessionLocal is None:
+            import time
+            max_retries = 3
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Attempting to initialize database (attempt {attempt + 1}/{max_retries})")
+                    self._setup_database()
+                    return
+                except Exception as e:
+                    logger.warning(f"Database initialization attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Failed to initialize database after {max_retries} attempts")
+                        raise
     
     def _setup_database(self):
-        """Set up database connection and run migrations"""
+        """Set up database connection and create tables"""
         try:
             database_url = self._get_database_url()
             logger.info(f"Connecting to database: {database_url.split('@')[1] if '@' in database_url else 'local'}")
@@ -166,8 +200,9 @@ class DatabaseManager:
                 echo=False
             )
             
-            # Run Alembic migrations
-            self._run_migrations()
+            # Create tables if they don't exist
+            Base.metadata.create_all(bind=self.engine)
+            logger.info("Database tables created/verified successfully")
             
             # Create session factory
             self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
@@ -178,29 +213,10 @@ class DatabaseManager:
             logger.error(f"Failed to connect to database: {e}")
             raise e
     
-    def _run_migrations(self):
-        """Run Alembic migrations"""
-        try:
-            from alembic import command
-            from alembic.config import Config
-            
-            # Set up Alembic config
-            alembic_cfg = Config("alembic.ini")
-            
-            # Override the database URL
-            database_url = self._get_database_url()
-            alembic_cfg.set_main_option("sqlalchemy.url", database_url)
-            
-            # Run migrations
-            command.upgrade(alembic_cfg, "head")
-            logger.info("Database migrations completed successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to run migrations: {e}")
-            raise e
     
     def get_session(self):
         """Get a database session"""
+        self._ensure_database_initialized()
         return self.SessionLocal()
     
     def save_greeting(self, greeting_text, user_id=None, ip_address=None):
@@ -439,6 +455,7 @@ class DatabaseManager:
     
     def get_all_translation_tags(self):
         """Get all translation tags with their translations"""
+        self._ensure_database_initialized()
         try:
             with self.get_session() as session:
                 # Query all translation tags
@@ -481,5 +498,12 @@ class DatabaseManager:
             return []
 
 
-# Global database manager instance
-db_manager = DatabaseManager()
+# Global database manager instance (lazy-loaded)
+db_manager = None
+
+def get_db_manager():
+    """Get the database manager instance, creating it if needed"""
+    global db_manager
+    if db_manager is None:
+        db_manager = DatabaseManager()
+    return db_manager

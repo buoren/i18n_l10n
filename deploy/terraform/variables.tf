@@ -30,3 +30,24 @@ variable "environment" {
   type        = string
   default     = "dev"
 }
+
+variable "google_client_id" {
+  description = "Google OAuth 2.0 Client ID"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "google_client_secret" {
+  description = "Google OAuth 2.0 Client Secret"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "jwt_secret" {
+  description = "JWT secret key for token signing"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

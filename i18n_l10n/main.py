@@ -5,13 +5,14 @@ Hello World NiceGUI Application
 from nicegui import ui
 import asyncio
 import uuid
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
-from .database import db_manager, LanguageCode
+from .database import get_db_manager, LanguageCode
 from google.cloud import translate_v2 as translate
 import logging
 from .admin.page import AdminPage
+from .auth import google_auth, create_login_page, create_logout_functionality, get_current_user
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -77,11 +78,54 @@ class TranslateResponse(BaseModel):
     translation: str
 
 
+class GoogleAuthRequest(BaseModel):
+    credential: str
+
+
+class AuthResponse(BaseModel):
+    success: bool
+    token: Optional[str] = None
+    user: Optional[dict] = None
+    error: Optional[str] = None
+
+
 # API endpoint for translation using FastAPI directly
 from fastapi import APIRouter
 
 # Create a router for API endpoints
 api_router = APIRouter()
+
+@api_router.post('/api/auth/google')
+async def google_auth_endpoint(request: GoogleAuthRequest) -> AuthResponse:
+    """
+    Handle Google OAuth authentication.
+    """
+    try:
+        # Verify the Google token
+        user_info = google_auth.verify_google_token(request.credential)
+        
+        if not user_info:
+            return AuthResponse(
+                success=False,
+                error="Invalid Google token"
+            )
+        
+        # Create JWT token
+        jwt_token = google_auth.create_jwt_token(user_info)
+        
+        return AuthResponse(
+            success=True,
+            token=jwt_token,
+            user=user_info
+        )
+        
+    except Exception as e:
+        logger.error(f"Google auth error: {str(e)}")
+        return AuthResponse(
+            success=False,
+            error=f"Authentication failed: {str(e)}"
+        )
+
 
 @api_router.post('/api/translate')
 async def translate_text(request: Request) -> dict:
@@ -124,7 +168,7 @@ async def translate_text(request: Request) -> dict:
             }
         
         # Create or get translation tag
-        tag_id = db_manager.create_translation_tag(
+        tag_id = get_db_manager().create_translation_tag(
             application="api-translate",
             tag=key,
             context=context
@@ -137,7 +181,7 @@ async def translate_text(request: Request) -> dict:
             }
         
         # Get translation from database
-        translation_text = db_manager.get_translation(tag_id, dst_language)
+        translation_text = get_db_manager().get_translation(tag_id, dst_language)
         
         if not translation_text:
             # If no translation exists, use Google Cloud Translation API
@@ -146,7 +190,7 @@ async def translate_text(request: Request) -> dict:
             
             # Save the translation to the database for future use
             try:
-                success = db_manager.save_translation(
+                success = get_db_manager().save_translation(
                     translation_tag_id=tag_id,
                     language=dst_language,
                     text=translation_text
@@ -177,99 +221,127 @@ async def translate_text(request: Request) -> dict:
         }
 
 
-def create_hello_world_app():
-    """Create the main Hello World NiceGUI application."""
-    
-    # Generate a unique session ID for this user
-    session_id = str(uuid.uuid4())
-    
-    # Set page title and favicon
-    ui.page_title('Hello World - i18n/l10n App')
-    
-    # Create a container with some styling
-    with ui.column().classes('items-center gap-4 p-8'):
-        # Main heading
-        ui.html('<h1 style="color: #1976d2; font-size: 3rem; margin-bottom: 1rem;">🌍 Hello World!</h1>')
+class CreateUserRequest(BaseModel):
+    name: str
+    email: str
+
+
+@api_router.post('/api/admin/create-user')
+async def create_user_endpoint(request: CreateUserRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Create a new user in the database.
+    Requires valid JWT authentication.
+    """
+    try:
+        # Additional security: verify user is authenticated
+        if not current_user or 'email' not in current_user:
+            return {
+                'success': False,
+                'error': 'Authentication required'
+            }
         
-        # Subtitle
-        ui.html('<h2 style="color: #666; font-size: 1.5rem; margin-bottom: 2rem;">Welcome to the i18n/l10n Testing App</h2>')
+        # Log the user creation attempt for security monitoring
+        logger.info(f"User creation attempt by: {current_user.get('email', 'unknown')}")
         
-        # Interactive elements
-        with ui.row().classes('gap-4 items-center'):
-            name_input = ui.input('Your Name', placeholder='Enter your name here...').classes('w-64')
-            greet_button = ui.button('Say Hello', icon='waving_hand')
+        # Verify admin access
+        if not verify_admin_access(current_user):
+            logger.warning(f"Unauthorized user creation attempt by: {current_user.get('email', 'unknown')}")
+            return {
+                'success': False,
+                'error': 'Admin access required'
+            }
         
-        # Display area
-        greeting_display = ui.html('<div style="font-size: 1.2rem; color: #1976d2; margin-top: 1rem;"></div>')
+        from .database import get_db_manager, User
+        from datetime import datetime
         
-        # Counter section
-        ui.html('<h3 style="color: #333; margin: 2rem 0 1rem 0;">Click Counter</h3>')
-        with ui.row().classes('gap-4 items-center'):
-            counter_display = ui.html('<span style="font-size: 1.5rem; font-weight: bold; color: #1976d2;">0</span>')
-            increment_button = ui.button('+', icon='add')
-            decrement_button = ui.button('-', icon='remove')
-            reset_button = ui.button('Reset', icon='refresh')
+        db_manager = get_db_manager()
         
-        # Counter state - simple in-memory counter
-        counter_value = {'value': 0}
+        with db_manager.get_session() as session:
+            # Check if user already exists
+            existing_user = session.query(User).filter(User.email == request.email).first()
+            if existing_user:
+                return {
+                    'success': True,
+                    'message': f'User already exists: {existing_user.name} ({existing_user.email})',
+                    'user_id': existing_user.id,
+                    'created_at': existing_user.created_at.isoformat() if existing_user.created_at else None
+                }
+            
+            # Create new user
+            new_user = User(
+                name=request.name,
+                email=request.email,
+                created_at=datetime.utcnow(),
+                is_active=True
+            )
+            
+            session.add(new_user)
+            session.commit()
+            
+            return {
+                'success': True,
+                'message': f'Successfully created user: {new_user.name} ({new_user.email})',
+                'user_id': new_user.id,
+                'created_at': new_user.created_at.isoformat() if new_user.created_at else None
+            }
+            
+    except Exception as e:
+        logger.error(f"Error creating user: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def verify_admin_access(current_user: dict) -> bool:
+    """
+    Verify that the current user has admin access.
+    Add your admin verification logic here.
+    """
+    # For now, basic email verification
+    # You can extend this with roles, permissions, etc.
+    admin_emails = ['buoren@gmail.com']  # Add your admin emails here
+    user_email = current_user.get('email', '')
+    return user_email in admin_emails
+
+
+@api_router.get('/api/admin/verify-access')
+async def verify_admin_access_endpoint(current_user: dict = Depends(get_current_user)):
+    """
+    Verify admin access for the current user.
+    This endpoint helps the UI verify admin privileges.
+    """
+    try:
+        if not current_user or 'email' not in current_user:
+            return {
+                'success': False,
+                'error': 'Authentication required'
+            }
         
-        def update_greeting():
-            name = name_input.value.strip()
-            if name:
-                greeting_text = f"Hello, {name}! 👋"
-                greeting_display.content = f'<div style="font-size: 1.2rem; color: #1976d2; margin-top: 1rem;">{greeting_text}</div>'
-                # Greeting displayed (no database storage)
-            else:
-                greeting_text = "Hello, World! 🌍"
-                greeting_display.content = f'<div style="font-size: 1.2rem; color: #1976d2; margin-top: 1rem;">{greeting_text}</div>'
-                # Greeting displayed (no database storage)
+        is_admin = verify_admin_access(current_user)
         
-        def update_counter():
-            counter_display.content = f'<span style="font-size: 1.5rem; font-weight: bold; color: #1976d2;">{counter_value["value"]}</span>'
+        return {
+            'success': True,
+            'is_admin': is_admin,
+            'user_email': current_user.get('email', '')
+        }
         
-        def increment():
-            counter_value['value'] += 1
-            update_counter()
-        
-        def decrement():
-            counter_value['value'] -= 1
-            update_counter()
-        
-        def reset():
-            counter_value['value'] = 0
-            update_counter()
-        
-        # Connect button events
-        greet_button.on_click(update_greeting)
-        increment_button.on_click(increment)
-        decrement_button.on_click(decrement)
-        reset_button.on_click(reset)
-        
-        # Initialize counter display
-        update_counter()
-        
-        # Simple status message
-        ui.html('<div style="margin-top: 2rem; padding: 1rem; background: #e8f5e8; border-radius: 4px; font-size: 0.9rem; color: #2e7d32;">✅ Application running successfully</div>')
-        
-        # Language selection (for future i18n implementation)
-        ui.html('<h3 style="color: #333; margin: 2rem 0 1rem 0;">Language Selection (Coming Soon)</h3>')
-        with ui.row().classes('gap-2'):
-            ui.button('English', icon='flag').classes('opacity-50')
-            ui.button('Español', icon='flag').classes('opacity-50')
-            ui.button('Français', icon='flag').classes('opacity-50')
-            ui.button('中文', icon='flag').classes('opacity-50')
-        
-        # Application status
-        ui.html('<div style="margin-top: 2rem; padding: 1rem; background: #e8f5e8; border-radius: 4px; font-size: 0.9rem; color: #2e7d32;">✅ Translation API ready</div>')
-        
-        # Footer
-        ui.html('<div style="margin-top: 3rem; color: #999; font-size: 0.9rem;">Built with ❤️ using NiceGUI + Google Cloud Translation</div>')
+    except Exception as e:
+        logger.error(f"Error verifying admin access: {e}")
+        return {
+            'success': False,
+            'error': 'Access verification failed'
+        }
 
 
 def main():
     """Main entry point for the application."""
+    # Create authentication pages
+    create_login_page()
+    create_logout_functionality()
+    
+    # Create admin page (will be protected by authentication)
     AdminPage().render_page()
-    create_hello_world_app()
     
     # Include the API router in the NiceGUI app
     from nicegui import app

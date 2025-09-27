@@ -15,24 +15,7 @@ provider "google" {
   region  = var.region
 }
 
-# Variables
-variable "project_id" {
-  description = "The GCP project ID"
-  type        = string
-  default     = "i18n-l10n"
-}
-
-variable "region" {
-  description = "The GCP region"
-  type        = string
-  default     = "europe-north1"
-}
-
-variable "database_tier" {
-  description = "The Cloud SQL instance tier"
-  type        = string
-  default     = "db-f1-micro"
-}
+# Variables are defined in variables.tf
 
 # Enable required APIs
 resource "google_project_service" "apis" {
@@ -40,7 +23,9 @@ resource "google_project_service" "apis" {
     "sqladmin.googleapis.com",
     "run.googleapis.com",
     "cloudbuild.googleapis.com",
-    "containerregistry.googleapis.com"
+    "containerregistry.googleapis.com",
+    "identitytoolkit.googleapis.com",
+    "vpcaccess.googleapis.com"
   ])
 
   service = each.value
@@ -66,7 +51,7 @@ resource "google_sql_database_instance" "mysql" {
       enabled                        = true
       start_time                     = "03:00"
       location                       = var.region
-      point_in_time_recovery_enabled = true
+      binary_log_enabled             = true
     }
     
     maintenance_window {
@@ -132,6 +117,37 @@ resource "google_cloud_run_v2_service" "app" {
         value = google_sql_user.appuser.name
       }
       
+      env {
+        name  = "GOOGLE_CLIENT_ID"
+        value = var.google_client_id
+      }
+      
+      env {
+        name  = "GOOGLE_CLIENT_SECRET"
+        value = var.google_client_secret
+      }
+      
+      env {
+        name  = "JWT_SECRET"
+        value = var.jwt_secret
+      }
+      
+      env {
+        name  = "DEPLOYMENT_VERSION"
+        value = "v2-no-alembic"
+      }
+      
+      
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret = "db_password"
+            version = "latest"
+          }
+        }
+      }
+      
       resources {
         limits = {
           cpu    = "1"
@@ -182,15 +198,4 @@ data "google_iam_policy" "policy" {
   }
 }
 
-# Outputs
-output "cloud_run_url" {
-  value = google_cloud_run_v2_service.app.uri
-}
-
-output "database_connection_name" {
-  value = google_sql_database_instance.mysql.connection_name
-}
-
-output "database_public_ip" {
-  value = google_sql_database_instance.mysql.public_ip_address
-}
+# Outputs are defined in outputs.tf
